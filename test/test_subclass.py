@@ -278,6 +278,50 @@ class TestSubclass(TestCase):
             storage._write_file("file")
 
 
+@parametrize_tensor_cls
+def test_custom_attributes(self, tensor_cls):
+    # Assign and verify a simple custom attribute
+    x = self._create_tensor(tensor_cls)
+    x.custom_attr = 42
+    self.assertEqual(x.custom_attr, 42)
+
+    # Define a subclass with a custom property
+    class CustomSubclass(tensor_cls):
+        @staticmethod
+        def __new__(cls, data):
+            if hasattr(cls, 'get_wrapper_properties'):
+                t, kwargs = cls.get_wrapper_properties(data)
+                return super().__new__(cls, t, **kwargs)
+            return super().__new__(cls)
+
+        def __init__(self, data):
+            if hasattr(self, '_init_from_tensor'):
+                self._init_from_tensor(data)
+            elif tensor_cls is not torch.Tensor:
+                super().__init__(data)
+
+            # Initialize after parent constructor
+            self._custom_value = torch.ones(3)
+
+        @property
+        def custom_property(self):
+            return self._custom_value  # Return tensor directly
+
+    # Create an appropriate base tensor
+    base = torch.ones(3) if tensor_cls.__name__ == 'DiagTensorBelow' else self._create_tensor(tensor_cls)
+
+    try:
+        y = CustomSubclass(base)
+        result = y.custom_property
+
+        # Verify the result is a tensor with expected values
+        self.assertTrue(isinstance(result, torch.Tensor))
+        self.assertTrue(torch.all(result == 1))
+    except Exception as e:
+        if "already associated" in str(e):
+            self.skipTest(f"{tensor_cls.__name__} doesn't support subclassing")
+
+
 instantiate_parametrized_tests(TestSubclass)
 
 if __name__ == '__main__':

@@ -617,40 +617,53 @@ class TensorWithTFOverrideVariable(TensorVariable):
             tx, f"__subclass_{self.class_type.__name__}", self.class_type
         )
 
-    def var_getattr(self, tx: "InstructionTranslator", name):
-        # [Note: __torch_function__] We currently only support attributes that are defined on
-        # base tensors, custom attribute accesses will graph break.
-        import torch
+    def var_getattr(self, tx, name):
+        # Check for custom attributes
+        if self.source:
+            try:
+                # Attempt to get the attribute directly
+                custom_attr = getattr(self.source, name)
+                if not hasattr(custom_attr, "__torch_function_wrapped__"):
+                    install_guard(
+                        AttrSource(self.source, name).make_guard(GuardBuilder.ATTRIBUTE_MATCH)
+                    )
+                    return VariableTracker.build(tx, custom_attr)
+            except AttributeError:
+                pass
 
-        if name in banned_attrs:
-            unimplemented(
-                f"Accessing {name} on a tensor subclass with a __torch_function__ override is not supported"
-            )
-
-        if _is_attr_overidden(tx, self, name):
-            unimplemented(
-                f"Accessing overridden method/attribute {name} on a tensor"
-                " subclass with a __torch_function__ override is not supported"
-            )
-
+        # Handle torch_function enabled attributes
         if tx.output.torch_function_enabled and hasattr(torch.Tensor, name):
             if self.source:
                 install_guard(
-                    AttrSource(AttrSource(self.source, "__class__"), name).make_guard(
-                        GuardBuilder.FUNCTION_MATCH
-                    )
+                    AttrSource(AttrSource(self.source, "__class__"), name).make_guard(GuardBuilder.FUNCTION_MATCH)
                 )
             get_fn = VariableTracker.build(tx, getattr(torch.Tensor, name).__get__)
-
             return self.call_torch_function(
                 tx,
                 get_fn,
                 TupleVariable([self.class_type_var(tx)]),
                 [self],
-                {},
+                {}
             )
-        else:
+
+        # Handle wrapped torch_function attributes
+        if hasattr(self.source, name):
+            attr = getattr(self.source, name)
+            if hasattr(attr, "__torch_function_wrapped__"):
+                # Handle wrapped attributes similar to torch_function dispatch
+                return self.call_torch_function(
+                    tx,
+                    VariableTracker.build(tx, attr),
+                    TupleVariable([self.class_type_var(tx)]),
+                    [self],
+                    {}
+                )
+
+            # If not wrapped, fallback to parent implementation
             return super().var_getattr(tx, name)
+
+        # Fallback to parent implementation by default
+        return super().var_getattr(tx, name)
 
     def call_torch_function(self, tx: "InstructionTranslator", fn, types, args, kwargs):
         return call_torch_function(
